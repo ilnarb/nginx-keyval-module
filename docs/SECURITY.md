@@ -6,7 +6,7 @@ With the shared memory (SHM) backend, data is stored in nginx's in-process share
 
 - Data is accessible from all worker processes
 - Data is not encrypted (stored in plaintext)
-- Data is lost when nginx is restarted or reloaded
+- Data is lost when nginx is restarted (unless a state file is used)
 - OS-level process isolation restricts direct access from external processes
 
 **Recommendations:**

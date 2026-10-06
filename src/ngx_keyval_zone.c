@@ -66,6 +66,8 @@ ngx_keyval_conf_zone_add(ngx_conf_t *cf, ngx_command_t *cmd,
         return NULL;
     }
 
+    ngx_memzero(zone, sizeof(*zone));
+
     zone->name = *name;
     zone->type = type;
 
@@ -155,10 +157,40 @@ ngx_keyval_conf_set_zone(ngx_conf_t *cf, ngx_command_t *cmd, void *conf,
     shm_zone->init = ngx_keyval_init_zone;
     shm_zone->data = ctx;
 
+    zone->shm = shm_zone;
+
     ctx->ttl = 0;
 
     for (i = 2; i < cf->args->nelts; i++) {
         ngx_str_t s = ngx_null_string;
+
+        if (ngx_strncmp(value[i].data, "state=", 6) == 0) {
+            if (zone->state_file.len != 0) {
+                ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                                   "\"%V\" duplicate parameter \"%V\"",
+                                   &cmd->name, &value[i]);
+                return NGX_CONF_ERROR;
+            }
+
+            if (value[i].len <= 6) {
+                ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                                   "\"%V\" invalid state file path \"%V\": "
+                                   "must not be empty",
+                                   &cmd->name, &value[i]);
+                return NGX_CONF_ERROR;
+            }
+
+            zone->state_file.len = value[i].len - 6;
+            zone->state_file.data = value[i].data + 6;
+
+            /* relative paths are resolved against the nginx prefix */
+            if (ngx_conf_full_name(cf->cycle, &zone->state_file, 0) != NGX_OK)
+            {
+                return "failed to allocate";
+            }
+
+            continue;
+        }
 
         if (ngx_strncmp(value[i].data, "ttl=", 4) == 0 && value[i].len > 4) {
             s.len = value[i].len - 4;
@@ -190,6 +222,8 @@ ngx_keyval_conf_set_zone(ngx_conf_t *cf, ngx_command_t *cmd, void *conf,
             return NGX_CONF_ERROR;
         }
     }
+
+    ctx->state_file = zone->state_file;
 
     return NGX_CONF_OK;
 }

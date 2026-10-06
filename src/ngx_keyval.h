@@ -39,6 +39,7 @@ typedef struct {
     ngx_keyval_sh_t *sh;
     ngx_slab_pool_t *shpool;
     time_t           ttl;
+    ngx_str_t        state_file;
 } ngx_keyval_shm_ctx_t;
 
 typedef struct {
@@ -66,6 +67,7 @@ struct ngx_keyval_zone_s {
     ngx_keyval_zone_type_t   type;
     ngx_shm_zone_t          *shm;
     ngx_keyval_store_ops_t  *store;
+    ngx_str_t                state_file;
     ngx_keyval_redis_conf_t  redis;
 };
 
@@ -133,6 +135,10 @@ ngx_int_t ngx_keyval_shm_get_data(ngx_keyval_shm_ctx_t *ctx,
     ngx_shm_zone_t *shm, ngx_str_t *key, ngx_str_t *val, ngx_pool_t *pool);
 ngx_int_t ngx_keyval_shm_set_data(ngx_keyval_shm_ctx_t *ctx,
     ngx_shm_zone_t *shm, ngx_str_t *key, ngx_str_t *val, ngx_log_t *log);
+ngx_int_t ngx_keyval_shm_save_data(ngx_keyval_shm_ctx_t *ctx,
+    ngx_shm_zone_t *shm, ngx_str_t *filepath, ngx_log_t *log);
+ngx_int_t ngx_keyval_shm_load_data(ngx_keyval_shm_ctx_t *ctx,
+    ngx_shm_zone_t *shm, ngx_str_t *filepath, ngx_log_t *log);
 
 /* ngx_keyval_store_redis.c */
 #if (NGX_HAVE_KEYVAL_ZONE_REDIS)
