@@ -20,6 +20,8 @@ static void ngx_http_keyval_variable_set_handler(ngx_http_request_t *r,
 static ngx_int_t ngx_http_keyval_variable_get_handler(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data);
 
+static void ngx_http_keyval_exit_master(ngx_cycle_t *cycle);
+
 static ngx_command_t ngx_http_keyval_commands[] = {
     { ngx_string("keyval"),
       NGX_HTTP_MAIN_CONF | NGX_CONF_TAKE3,
@@ -66,7 +68,7 @@ ngx_module_t ngx_http_keyval_module = {
     NULL,                      /* init thread */
     NULL,                      /* exit thread */
     NULL,                      /* exit process */
-    NULL,                      /* exit master */
+    ngx_http_keyval_exit_master, /* exit master */
     NGX_MODULE_V1_PADDING
 };
 
@@ -218,4 +220,36 @@ ngx_http_keyval_variable_get_handler(ngx_http_request_t *r,
     v->no_cacheable = 0;
 
     return NGX_OK;
+}
+
+static void
+ngx_http_keyval_exit_master(ngx_cycle_t *cycle)
+{
+    ngx_uint_t            i;
+    ngx_keyval_conf_t    *conf;
+    ngx_keyval_zone_t    *zones;
+    ngx_keyval_shm_ctx_t *ctx;
+
+    conf = ngx_http_cycle_get_module_main_conf(cycle, ngx_http_keyval_module);
+    if (conf == NULL || conf->zones == NULL) {
+        return;
+    }
+
+    zones = conf->zones->elts;
+
+    for (i = 0; i < conf->zones->nelts; i++) {
+        if (zones[i].type != NGX_KEYVAL_ZONE_SHM
+            || zones[i].state_file.len == 0)
+        {
+            continue;
+        }
+
+        ctx = ngx_keyval_shm_get_context(zones[i].shm, cycle->log);
+        if (ctx == NULL) {
+            continue;
+        }
+
+        ngx_keyval_shm_save_data(ctx, zones[i].shm, &zones[i].state_file,
+                                 cycle->log);
+    }
 }

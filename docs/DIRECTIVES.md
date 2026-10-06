@@ -49,7 +49,7 @@ The following flags are set on the defined variable.
 ### keyval_zone
 
 ```
-Syntax:  keyval_zone zone=name:size [ttl=time] [timeout=time];
+Syntax:  keyval_zone zone=name:size [ttl=time] [timeout=time] [state=file];
 Default: --
 Context: http, stream
 ```
@@ -63,6 +63,7 @@ Sets the name and size of the shared memory zone that holds the key-value databa
 | `zone=name:size` | Yes | -- | Zone name and size. `name` is the zone identifier, `size` is the shared memory size |
 | `ttl=time` | No | `0` (no expiration) | Expiration time for key-value pairs |
 | `timeout=time` | No | `0` (no expiration) | Legacy alias for `ttl` |
+| `state=file` | No | -- | Path to the state file used to save/restore the zone content on nginx shutdown/startup |
 
 #### Zone Size
 
@@ -91,6 +92,24 @@ keyval_zone zone=session:1m ttl=1h;   # Expires after 1 hour
 ```
 
 > **Note**: `timeout` is a legacy alias for `ttl`. Specifying both at the same time will result in an error.
+
+#### State File
+
+The `state` parameter enables persistence of the zone content to a file:
+
+- **Save**: when nginx shuts down gracefully (e.g. `nginx -s quit`, `nginx -s stop`, `SIGTERM`, `SIGQUIT`), the zone content is written to the state file. The file is written atomically: data is first written to a temporary `<file>.tmp` and then renamed over the state file
+- **Restore**: when nginx starts and the zone is created anew, the zone content is restored from the state file. On `nginx -s reload` the shared memory content survives and the state file is **not** re-read, so data written after startup is never clobbered by older file content
+- Entries that have expired (per `ttl`) are not saved and not restored
+- A missing state file (first start) is not an error; a corrupted or truncated state file is reported as an error and prevents nginx from starting
+
+The path may be absolute or relative; relative paths are resolved against the nginx prefix (the `-p` command-line option or the compiled default). The parameter may be specified only once. It is not supported for `keyval_zone_redis` zones (Redis data is managed by the Redis server).
+
+```nginx
+keyval_zone zone=cache:64k state=/var/lib/nginx/state/cache.keyval;  # absolute
+keyval_zone zone=cache:64k state=state/cache.keyval;                 # relative to prefix
+```
+
+> **Note**: the state file is written by the master process on shutdown; the directory must exist and be writable by the master process user.
 
 ### keyval_zone_redis
 

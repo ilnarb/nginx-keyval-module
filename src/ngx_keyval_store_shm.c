@@ -6,6 +6,20 @@
 #include <ngx_event.h>
 #include "ngx_keyval.h"
 
+#define NGX_KEYVAL_STATE_MAGIC    "KVST"
+#define NGX_KEYVAL_STATE_VERSION  1
+
+typedef struct {
+    u_char    magic[4];    /* NGX_KEYVAL_STATE_MAGIC */
+    uint32_t  version;     /* NGX_KEYVAL_STATE_VERSION */
+} ngx_keyval_state_header_t;
+
+typedef struct {
+    uint32_t  key_len;
+    uint32_t  val_len;
+    int64_t   expires_at;  /* absolute time in seconds, 0 = never expires */
+} ngx_keyval_state_record_t;
+
 static void
 ngx_keyval_rbtree_insert_value(ngx_rbtree_node_t *temp,
     ngx_rbtree_node_t *node,
@@ -117,6 +131,14 @@ ngx_keyval_init_zone(ngx_shm_zone_t *shm_zone, void *data)
                 &shm_zone->shm.name);
 
     ctx->shpool->log_nomem = 0;
+
+    /* zone is created anew: restore content from the state file if any */
+    if (ctx->state_file.len > 0
+        && ngx_keyval_shm_load_data(ctx, shm_zone, &ctx->state_file,
+                                    ngx_cycle->log) != NGX_OK)
+    {
+        return NGX_ERROR;
+    }
 
     return NGX_OK;
 }
@@ -250,4 +272,302 @@ ngx_keyval_shm_set_data(ngx_keyval_shm_ctx_t *ctx, ngx_shm_zone_t *shm,
     ngx_shmtx_unlock(&ctx->shpool->mutex);
 
     return rc;
+}
+
+ngx_int_t
+ngx_keyval_shm_save_data(ngx_keyval_shm_ctx_t *ctx, ngx_shm_zone_t *shm,
+    ngx_str_t *filepath, ngx_log_t *log)
+{
+    u_char                    *p, *tmp;
+    size_t                     len;
+    ngx_fd_t                   fd;
+    ngx_int_t                  rc;
+    ngx_file_t                 file;
+    ngx_rbtree_node_t         *node, *root, *sentinel;
+    ngx_keyval_node_t         *kv;
+    time_t                     now_sec;
+    ngx_msec_t                 now_msec;
+    ngx_keyval_state_header_t  header;
+    ngx_keyval_state_record_t  record;
+
+    if (!ctx || !filepath || filepath->len == 0) {
+        return NGX_OK;
+    }
+
+    len = filepath->len + sizeof(".tmp");
+
+    tmp = ngx_pnalloc(ngx_cycle->pool, len);
+    if (tmp == NULL) {
+        ngx_log_error(NGX_LOG_ERR, log, 0,
+                      "keyval: failed to allocate temporary state file name"
+                      " for zone \"%V\"", &shm->shm.name);
+        return NGX_ERROR;
+    }
+
+    p = ngx_copy(tmp, filepath->data, filepath->len);
+    p = ngx_cpystrn(p, (u_char *) ".tmp", sizeof(".tmp"));
+
+    fd = ngx_open_file(tmp, NGX_FILE_RDWR, NGX_FILE_TRUNCATE,
+                       NGX_FILE_DEFAULT_ACCESS);
+    if (fd == NGX_INVALID_FILE) {
+        ngx_log_error(NGX_LOG_ERR, log, ngx_errno,
+                      "keyval: failed to open state file \"%s\" for writing"
+                      " for zone \"%V\"", tmp, &shm->shm.name);
+        return NGX_ERROR;
+    }
+
+    ngx_memzero(&file, sizeof(ngx_file_t));
+    file.fd = fd;
+    file.name.data = tmp;
+    file.name.len = p - tmp;
+    file.log = log;
+
+    ngx_memcpy(header.magic, NGX_KEYVAL_STATE_MAGIC, 4);
+    header.version = NGX_KEYVAL_STATE_VERSION;
+
+    if (ngx_write_file(&file, (u_char *) &header, sizeof(header), file.offset)
+        == NGX_ERROR)
+    {
+        ngx_log_error(NGX_LOG_ERR, log, 0,
+                      "keyval: failed to write state file \"%s\""
+                      " for zone \"%V\"", tmp, &shm->shm.name);
+        ngx_close_file(fd);
+        return NGX_ERROR;
+    }
+
+    now_sec = ngx_time();
+    now_msec = ngx_current_msec;
+
+    rc = NGX_OK;
+
+    ngx_shmtx_lock(&ctx->shpool->mutex);
+
+    root = ctx->sh->rbtree.root;
+    sentinel = ctx->sh->rbtree.sentinel;
+
+    if (root != sentinel) {
+        for (node = ngx_rbtree_min(root, sentinel);
+             node;
+             node = ngx_rbtree_next(&ctx->sh->rbtree, node))
+        {
+            kv = (ngx_keyval_node_t *) &node->color;
+
+            /* skip expired entries */
+            if (kv->expires_at != 0
+                && (ngx_msec_int_t) (ngx_current_msec - kv->expires_at) >= 0)
+            {
+                continue;
+            }
+
+            record.key_len = (uint32_t) kv->len;
+            record.val_len = (uint32_t) (kv->size - kv->len);
+
+            if (kv->expires_at != 0) {
+                record.expires_at = (int64_t) (now_sec
+                     + ((ngx_msec_int_t) (kv->expires_at - now_msec)) / 1000);
+            } else {
+                record.expires_at = 0;
+            }
+
+            if (ngx_write_file(&file, (u_char *) &record, sizeof(record),
+                               file.offset) == NGX_ERROR
+                || ngx_write_file(&file, kv->data, kv->len,
+                                  file.offset) == NGX_ERROR
+                || ngx_write_file(&file, kv->data + kv->len, kv->size - kv->len,
+                                  file.offset) == NGX_ERROR)
+            {
+                ngx_log_error(NGX_LOG_ERR, log, 0,
+                              "keyval: failed to write state file \"%s\""
+                              " for zone \"%V\"", tmp, &shm->shm.name);
+                rc = NGX_ERROR;
+                break;
+            }
+        }
+    }
+
+    ngx_shmtx_unlock(&ctx->shpool->mutex);
+
+    if (ngx_close_file(fd) == NGX_FILE_ERROR) {
+        ngx_log_error(NGX_LOG_ERR, log, ngx_errno,
+                      "keyval: failed to close state file \"%s\""
+                      " for zone \"%V\"", tmp, &shm->shm.name);
+        rc = NGX_ERROR;
+    }
+
+    if (rc != NGX_OK) {
+        return NGX_ERROR;
+    }
+
+    if (ngx_rename_file(tmp, filepath->data) == NGX_FILE_ERROR) {
+        ngx_log_error(NGX_LOG_ERR, log, ngx_errno,
+                      "keyval: failed to rename state file \"%s\" to \"%V\""
+                      " for zone \"%V\"", tmp, filepath, &shm->shm.name);
+        return NGX_ERROR;
+    }
+
+    return NGX_OK;
+}
+
+ngx_int_t
+ngx_keyval_shm_load_data(ngx_keyval_shm_ctx_t *ctx, ngx_shm_zone_t *shm,
+    ngx_str_t *filepath, ngx_log_t *log)
+{
+    u_char                    *buf, *p, *end;
+    size_t                     file_size, n;
+    ngx_fd_t                   fd;
+    ngx_file_t                 file;
+    ngx_file_info_t            fi;
+    ngx_rbtree_node_t         *node;
+    ngx_keyval_node_t         *kv;
+    ngx_str_t                  key, val;
+    time_t                     now;
+    ngx_uint_t                 loaded, expired;
+    ngx_keyval_state_header_t *header;
+    ngx_keyval_state_record_t *record;
+
+    if (!ctx || !filepath || filepath->len == 0) {
+        return NGX_OK;
+    }
+
+    fd = ngx_open_file(filepath->data, NGX_FILE_RDONLY, NGX_FILE_OPEN, 0);
+    if (fd == NGX_INVALID_FILE) {
+        /* first start: no state file yet */
+        return NGX_OK;
+    }
+
+    if (ngx_fd_info(fd, &fi) == NGX_FILE_ERROR) {
+        ngx_log_error(NGX_LOG_EMERG, log, ngx_errno,
+                      "keyval: failed to get state file \"%V\" info"
+                      " for zone \"%V\"", filepath, &shm->shm.name);
+        ngx_close_file(fd);
+        return NGX_ERROR;
+    }
+
+    file_size = (size_t) ngx_file_size(&fi);
+
+    if (file_size < sizeof(ngx_keyval_state_header_t)) {
+        ngx_log_error(NGX_LOG_EMERG, log, 0,
+                      "keyval: state file \"%V\" for zone \"%V\""
+                      " is corrupted", filepath, &shm->shm.name);
+        ngx_close_file(fd);
+        return NGX_ERROR;
+    }
+
+    buf = ngx_pnalloc(ngx_cycle->pool, file_size);
+    if (buf == NULL) {
+        ngx_log_error(NGX_LOG_EMERG, log, 0,
+                      "keyval: failed to allocate buffer to read"
+                      " state file \"%V\" for zone \"%V\"",
+                      filepath, &shm->shm.name);
+        ngx_close_file(fd);
+        return NGX_ERROR;
+    }
+
+    ngx_memzero(&file, sizeof(ngx_file_t));
+    file.fd = fd;
+    file.name = *filepath;
+    file.log = log;
+
+    if (ngx_read_file(&file, buf, file_size, 0) != (ssize_t) file_size) {
+        ngx_log_error(NGX_LOG_EMERG, log, 0,
+                      "keyval: failed to read state file \"%V\""
+                      " for zone \"%V\"", filepath, &shm->shm.name);
+        ngx_close_file(fd);
+        return NGX_ERROR;
+    }
+
+    ngx_close_file(fd);
+
+    header = (ngx_keyval_state_header_t *) buf;
+
+    if (ngx_memcmp(header->magic, NGX_KEYVAL_STATE_MAGIC, 4) != 0
+        || header->version != NGX_KEYVAL_STATE_VERSION)
+    {
+        ngx_log_error(NGX_LOG_EMERG, log, 0,
+                      "keyval: state file \"%V\" for zone \"%V\""
+                      " has invalid format", filepath, &shm->shm.name);
+        return NGX_ERROR;
+    }
+
+    p = buf + sizeof(ngx_keyval_state_header_t);
+    end = buf + file_size;
+
+    now = ngx_time();
+    loaded = 0;
+    expired = 0;
+
+    while (p < end) {
+        if ((size_t) (end - p) < sizeof(ngx_keyval_state_record_t)) {
+            goto corrupted;
+        }
+
+        record = (ngx_keyval_state_record_t *) p;
+        p += sizeof(ngx_keyval_state_record_t);
+
+        if ((size_t) (end - p) < (size_t) record->key_len + record->val_len) {
+            goto corrupted;
+        }
+
+        key.data = p;
+        key.len = record->key_len;
+        p += record->key_len;
+
+        val.data = p;
+        val.len = record->val_len;
+        p += record->val_len;
+
+        /* skip expired entries */
+        if (record->expires_at != 0 && (time_t) record->expires_at <= now) {
+            expired++;
+            continue;
+        }
+
+        n = offsetof(ngx_rbtree_node_t, color)
+            + offsetof(ngx_keyval_node_t, data)
+            + key.len
+            + val.len;
+
+        node = ngx_slab_alloc(ctx->shpool, n);
+        if (node == NULL) {
+            ngx_log_error(NGX_LOG_EMERG, log, 0,
+                          "keyval: not enough room in zone \"%V\" to restore"
+                          " state file \"%V\": %ui entries loaded,"
+                          " loading stopped",
+                          &shm->shm.name, filepath, loaded);
+            return NGX_ERROR;
+        }
+
+        kv = (ngx_keyval_node_t *) &node->color;
+
+        node->key = ngx_crc32_short(key.data, key.len);
+        kv->size = key.len + val.len;
+        kv->len = key.len;
+        ngx_memcpy(kv->data, key.data, key.len);
+        ngx_memcpy(kv->data + key.len, val.data, val.len);
+
+        if (record->expires_at != 0) {
+            kv->expires_at = ngx_current_msec
+                             + (ngx_msec_t) ((record->expires_at - now) * 1000);
+        } else {
+            kv->expires_at = 0;
+        }
+
+        ngx_rbtree_insert(&ctx->sh->rbtree, node);
+        loaded++;
+    }
+
+    ngx_log_error(NGX_LOG_NOTICE, log, 0,
+                  "keyval: restored %ui entries from state file \"%V\""
+                  " for zone \"%V\" (%ui expired entries skipped)",
+                  loaded, filepath, &shm->shm.name, expired);
+
+    return NGX_OK;
+
+corrupted:
+
+    ngx_log_error(NGX_LOG_EMERG, log, 0,
+                  "keyval: state file \"%V\" for zone \"%V\" is corrupted"
+                  " or truncated", filepath, &shm->shm.name);
+
+    return NGX_ERROR;
 }

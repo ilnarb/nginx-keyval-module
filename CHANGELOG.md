@@ -3,6 +3,12 @@
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.6.0] - 2026-10-05
+
+### Added
+
+- `state=` parameter for `keyval_zone` that persists the shared memory zone content to a file: the zone is saved when nginx shuts down gracefully (via the module `exit_master` handler) and restored on startup when the zone is created anew (not on reload, where shared memory content survives). The state file is written atomically (temporary file + rename) in a binary format; expired entries are not saved or restored; a missing state file on first start is not an error, while a corrupted one is reported and prevents startup
+
 ## [0.5.0] - 2026-06-15
 
 ### Added
