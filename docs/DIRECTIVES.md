@@ -60,7 +60,7 @@ Sets the name and size of the shared memory zone that holds the key-value databa
 
 | Parameter | Required | Default | Description |
 |---|---|---|---|
-| `zone=name:size` | Yes | -- | Zone name and size. `name` is the zone identifier, `size` is the shared memory size |
+| `zone=name:size[:file=shm-persist-file]` | Yes | -- | Zone name and size. `name` is the zone identifier, `size` is the shared memory size, `shm-persist-file` is the persist file path |
 | `ttl=time` | No | `0` (no expiration) | Expiration time for key-value pairs |
 | `timeout=time` | No | `0` (no expiration) | Legacy alias for `ttl` |
 
