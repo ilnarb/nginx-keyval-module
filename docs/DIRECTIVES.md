@@ -49,7 +49,7 @@ The following flags are set on the defined variable.
 ### keyval_zone
 
 ```
-Syntax:  keyval_zone zone=name:size [ttl=time] [timeout=time];
+Syntax:  keyval_zone zone=name:size[:file=shm-persist-file] [ttl=time] [timeout=time];
 Default: --
 Context: http, stream
 ```
